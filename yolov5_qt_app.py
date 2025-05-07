@@ -44,42 +44,70 @@ class DetectionThread(QThread):
     
     def __init__(self, weights='yolov5/yolov5s.pt', device=''):
         super().__init__()
-        self.weights = weights  # YOLOv5s 모델 사용
+        self.weights = weights
         self.device = device
-        self.source = 'webcam'  # 'webcam' 또는 'screen'
-        self.conf_thres = 0.5  # 신뢰도 임계값 0.25에서 0.5로 수정
+        self.source = 'webcam'
+        self.conf_thres = 0.5
         self.iou_thres = 0.45
         self.model = None
         self.cap = None
         self.is_running = True
         self.camera_open_failed = False
-        self.model_name = 'YOLOv5s'  # 모델 이름 추가
+        self.model_name = 'YOLOv5s'
         
         # 성능 최적화 관련 변수
-        self.img_size = 416  # 처리 이미지 크기 (640 -> 416)
-        self.process_every_n_frames = 1  # 매 프레임마다 처리 (스킵 없음)
+        self.img_size = 416
+        self.process_every_n_frames = 1
         self.frame_count = 0
-        self.fps_values = deque(maxlen=10)  # FPS 값을 평균내기 위한 큐
+        self.fps_values = deque(maxlen=10)
         self.average_fps = 0
-        self.last_detection_results = None  # 마지막 탐지 결과 저장
+        self.last_detection_results = None
         
         # 가속화 옵션
         if torch.cuda.is_available():
-            self.half = True  # FP16 (반정밀도) 사용
+            self.half = True
         else:
             self.half = False
         
-        self.load_model()
+        # 카메라 초기화를 별도 스레드로 실행
+        self.camera_thread = QThread()
+        self.camera_thread.run = self.initialize_camera
+        self.camera_thread.start()
+        
+        # 모델 로딩을 별도 스레드로 실행
+        self.model_thread = QThread()
+        self.model_thread.run = self.load_model
+        self.model_thread.start()
     
+    def initialize_camera(self):
+        """카메라 초기화를 별도 스레드에서 실행"""
+        try:
+            self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)  # DirectShow 백엔드 사용
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self.cap.set(cv2.CAP_PROP_FPS, 30)  # FPS 설정
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 버퍼 크기 최소화
+            
+            if not self.cap.isOpened():
+                self.camera_error_signal.emit("카메라를 열 수 없습니다.")
+                self.camera_open_failed = True
+                print("카메라를 열 수 없습니다.")
+            else:
+                self.camera_open_failed = False
+                print("카메라 연결 성공!")
+        except Exception as e:
+            print(f"카메라 초기화 오류: {e}")
+            self.camera_error_signal.emit(f"카메라 초기화 오류: {e}")
+            self.camera_open_failed = True
+
     def load_model(self):
         """YOLOv5 모델 로드"""
         try:
             device = select_device(self.device)
             self.model = attempt_load(self.weights, device=device)
             
-            # 모델 최적화
             if self.half:
-                self.model.half()  # FP16로 변환
+                self.model.half()
             
             # 워밍업
             dummy_input = torch.zeros((1, 3, self.img_size, self.img_size), device=device)
@@ -94,6 +122,18 @@ class DetectionThread(QThread):
             print(f"모델 로딩 오류: {e}")
             import traceback
             traceback.print_exc()
+
+    def open_camera(self):
+        """카메라 열기"""
+        if self.cap is not None and self.cap.isOpened():
+            self.cap.release()
+        
+        # 카메라 초기화 스레드가 실행 중이면 대기
+        if self.camera_thread.isRunning():
+            self.camera_thread.wait()
+        
+        # 카메라 초기화 재시도
+        self.initialize_camera()
     
     def change_source(self, source):
         """입력 소스 변경 (webcam 또는 screen)"""
@@ -104,25 +144,6 @@ class DetectionThread(QThread):
         
         # 소스 변경 시 마지막 탐지 결과 초기화
         self.last_detection_results = None
-    
-    def open_camera(self):
-        """카메라 열기"""
-        if self.cap is not None and self.cap.isOpened():
-            self.cap.release()
-        
-        self.cap = cv2.VideoCapture(0)
-        
-        # 카메라 해상도 설정 - 성능 최적화
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        
-        if not self.cap.isOpened():
-            self.camera_error_signal.emit("카메라를 열 수 없습니다.")
-            self.camera_open_failed = True
-            print("카메라를 열 수 없습니다.")
-        else:
-            self.camera_open_failed = False
-            print("카메라 연결 성공!")
     
     def capture_screen(self):
         """화면 캡처"""
