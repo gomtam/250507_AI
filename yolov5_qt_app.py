@@ -19,11 +19,24 @@ MODEL_PATH = 'yolov5'
 sys.path.append(MODEL_PATH)
 
 # YOLOv5 모듈 임포트
-from models.experimental import attempt_load
-from utils.general import check_img_size, non_max_suppression, scale_boxes
-from utils.plots import Annotator, colors
-from utils.torch_utils import select_device
-from utils.augmentations import letterbox
+try:
+    from models.experimental import attempt_load
+    from utils.general import check_img_size, non_max_suppression, scale_boxes
+    from utils.plots import Annotator, colors
+    from utils.torch_utils import select_device
+    from utils.augmentations import letterbox
+except ModuleNotFoundError:
+    # PyInstaller 실행 환경에서 경로 재설정
+    import os
+    yolo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yolov5")
+    sys.path.insert(0, yolo_path)
+    
+    # 직접 경로 참조로 임포트
+    from yolov5.models.experimental import attempt_load
+    from yolov5.utils.general import check_img_size, non_max_suppression, scale_boxes
+    from yolov5.utils.plots import Annotator, colors
+    from yolov5.utils.torch_utils import select_device
+    from yolov5.utils.augmentations import letterbox
 
 class DetectionThread(QThread):
     change_pixmap_signal = pyqtSignal(np.ndarray)
