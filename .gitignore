@@ -1,0 +1,49 @@
+# Python 관련 파일
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 가상 환경
+venv/
+ENV/
+env/
+
+# PyTorch 모델 파일 (용량이 크기 때문에)
+*.pt
+*.pth
+
+# 로그 및 임시 파일
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# YOLOv5 관련 디렉토리 (Git 서브모듈로 관리하는 것이 좋음)
+# 다음 줄의 주석을 제거하면 yolov5 폴더가 제외됩니다
+yolov5/
+
+# 기타 무거운 미디어 파일
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.avi
+*.mov 
