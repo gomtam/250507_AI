@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>400</width>
-    <height>300</height>
+    <width>1280</width>
+    <height>720</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -18,38 +18,25 @@
     <rect>
      <x>20</x>
      <y>20</y>
-     <width>251</width>
-     <height>201</height>
+     <width>1231</width>
+     <height>651</height>
     </rect>
    </property>
    <property name="text">
-    <string>screen</string>
+    <string/>
    </property>
   </widget>
   <widget class="QPushButton" name="btn_exit">
    <property name="geometry">
     <rect>
-     <x>320</x>
-     <y>260</y>
+     <x>1190</x>
+     <y>680</y>
      <width>75</width>
      <height>23</height>
     </rect>
    </property>
    <property name="text">
     <string>종료</string>
-   </property>
-  </widget>
-  <widget class="QPushButton" name="btn_mode">
-   <property name="geometry">
-    <rect>
-     <x>300</x>
-     <y>30</y>
-     <width>75</width>
-     <height>23</height>
-    </rect>
-   </property>
-   <property name="text">
-    <string>모드변경</string>
    </property>
   </widget>
  </widget>

@@ -39,360 +39,209 @@ except ModuleNotFoundError:
     from yolov5.utils.augmentations import letterbox
 
 class DetectionThread(QThread):
-    change_pixmap_signal = pyqtSignal(np.ndarray)
-    camera_error_signal = pyqtSignal(str)
-    
-    def __init__(self, weights='yolov5/yolov5s.pt', device=''):
-        super().__init__()
-        self.weights = weights
-        self.device = device
-        self.source = 'webcam'
-        self.conf_thres = 0.5
-        self.iou_thres = 0.45
-        self.model = None
+    frame_ready = pyqtSignal(np.ndarray)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, model, parent=None):
+        super().__init__(parent)
+        self.model = model
+        self.running = True
         self.cap = None
-        self.is_running = True
-        self.camera_open_failed = False
-        self.model_name = 'YOLOv5s'
-        
-        # 성능 최적화 관련 변수
-        self.img_size = 416
-        self.process_every_n_frames = 1
+        self.process_every_n_frames = 2  # 2프레임마다 처리
         self.frame_count = 0
-        self.fps_values = deque(maxlen=10)
-        self.average_fps = 0
-        self.last_detection_results = None
-        
-        # 가속화 옵션
-        if torch.cuda.is_available():
-            self.half = True
-        else:
-            self.half = False
-        
-        # 카메라 초기화를 별도 스레드로 실행
-        self.camera_thread = QThread()
-        self.camera_thread.run = self.initialize_camera
-        self.camera_thread.start()
-        
-        # 모델 로딩을 별도 스레드로 실행
-        self.model_thread = QThread()
-        self.model_thread.run = self.load_model
-        self.model_thread.start()
-    
-    def initialize_camera(self):
-        """카메라 초기화를 별도 스레드에서 실행"""
+        self.last_fps = 0
+        self.fps_start_time = time.time()
+        self.fps_counter = 0
+        self.last_frame = None  # 마지막 처리된 프레임 저장
+
+    def run(self):
         try:
-            self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)  # DirectShow 백엔드 사용
+            # 카메라 초기화
+            self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            if not self.cap.isOpened():
+                self.error_occurred.emit("카메라를 열 수 없습니다.")
+                return
+
+            # 카메라 설정
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            self.cap.set(cv2.CAP_PROP_FPS, 30)  # FPS 설정
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 버퍼 크기 최소화
-            
-            if not self.cap.isOpened():
-                self.camera_error_signal.emit("카메라를 열 수 없습니다.")
-                self.camera_open_failed = True
-                print("카메라를 열 수 없습니다.")
-            else:
-                self.camera_open_failed = False
-                print("카메라 연결 성공!")
-        except Exception as e:
-            print(f"카메라 초기화 오류: {e}")
-            self.camera_error_signal.emit(f"카메라 초기화 오류: {e}")
-            self.camera_open_failed = True
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    def load_model(self):
-        """YOLOv5 모델 로드"""
-        try:
-            device = select_device(self.device)
-            self.model = attempt_load(self.weights, device=device)
-            
-            if self.half:
-                self.model.half()
-            
-            # 워밍업
-            dummy_input = torch.zeros((1, 3, self.img_size, self.img_size), device=device)
-            if self.half:
-                dummy_input = dummy_input.half()
-            self.model(dummy_input)
-            
-            self.device = device
-            self.names = self.model.module.names if hasattr(self.model, 'module') else self.model.names
-            print(f"{self.model_name} 모델 로딩 완료! ({'Half precision' if self.half else 'Full precision'})")
-        except Exception as e:
-            print(f"모델 로딩 오류: {e}")
-            import traceback
-            traceback.print_exc()
+            while self.running:
+                ret, frame = self.cap.read()
+                if not ret:
+                    self.error_occurred.emit("프레임을 읽을 수 없습니다.")
+                    break
 
-    def open_camera(self):
-        """카메라 열기"""
-        if self.cap is not None and self.cap.isOpened():
-            self.cap.release()
-        
-        # 카메라 초기화 스레드가 실행 중이면 대기
-        if self.camera_thread.isRunning():
-            self.camera_thread.wait()
-        
-        # 카메라 초기화 재시도
-        self.initialize_camera()
-    
-    def change_source(self, source):
-        """입력 소스 변경 (webcam 또는 screen)"""
-        self.source = source
-        if self.source == 'webcam':
-            if self.cap is None or not self.cap.isOpened():
-                self.open_camera()
-        
-        # 소스 변경 시 마지막 탐지 결과 초기화
-        self.last_detection_results = None
-    
-    def capture_screen(self):
-        """화면 캡처"""
+                # FPS 계산
+                self.fps_counter += 1
+                if time.time() - self.fps_start_time >= 1.0:
+                    self.last_fps = self.fps_counter
+                    self.fps_counter = 0
+                    self.fps_start_time = time.time()
+
+                # 프레임 스킵 처리
+                self.frame_count += 1
+                if self.frame_count % self.process_every_n_frames == 0:
+                    # 프레임 처리
+                    processed_frame = self.process_frame(frame)
+                    self.last_frame = processed_frame
+                elif self.last_frame is not None:
+                    # 스킵된 프레임에는 이전 결과 재사용
+                    processed_frame = self.last_frame.copy()
+                else:
+                    processed_frame = frame
+
+                self.frame_ready.emit(processed_frame)
+
+                # CPU 사용량 제한
+                time.sleep(0.01)
+
+        except Exception as e:
+            self.error_occurred.emit(f"프레임 처리 중 오류 발생: {str(e)}")
+        finally:
+            if self.cap is not None:
+                self.cap.release()
+
+    def process_frame(self, frame):
         try:
-            screenshot = pyautogui.screenshot()
-            frame = np.array(screenshot)
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            # 이미지 크기 조정 (더 작게)
+            img = cv2.resize(frame, (320, 320))  # 416x416에서 320x320으로 축소
             
-            # 화면 캡처 크기 조정 (더 작게)
-            scale_percent = 40  # 원본 크기의 40% (기존 50%에서 감소)
-            width = int(frame.shape[1] * scale_percent / 100)
-            height = int(frame.shape[0] * scale_percent / 100)
-            frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+            # YOLOv5 추론
+            with torch.no_grad():  # 메모리 사용량 최적화
+                results = self.model(img)
             
+            # 결과 시각화
+            annotated_frame = results.render()[0]
+            
+            # 원본 크기로 복원
+            annotated_frame = cv2.resize(annotated_frame, (frame.shape[1], frame.shape[0]))
+            
+            # FPS 표시 (텍스트 크기 축소)
+            cv2.putText(annotated_frame, f'FPS: {self.last_fps}', (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 1)
+            
+            return annotated_frame
+            
+        except Exception as e:
+            print(f"프레임 처리 중 오류 발생: {str(e)}")
             return frame
-        except Exception as e:
-            print(f"화면 캡처 오류: {e}")
-            return None
-    
-    def detect_objects(self, img):
-        """이미지에서 객체 탐지"""
-        if self.model is None:
-            return [], img
-        
-        # 텐서 값을 Python 스칼라로 변환
-        stride = int(self.model.stride.max().item())
-        img_size = check_img_size(self.img_size, s=stride)
-        
-        # 이미지 전처리
-        img0 = img.copy()
-        img = letterbox(img0, img_size, stride=stride, auto=False)[0]
-        img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
-        img = np.ascontiguousarray(img)
-        
-        img = torch.from_numpy(img).to(self.device)
-        if self.half:
-            img = img.half()  # FP16 변환
-        else:
-            img = img.float()
-        img /= 255.0  # 0 - 255 to 0.0 - 1.0
-        if len(img.shape) == 3:
-            img = img[None]  # expand for batch dim
-        
-        # 추론
-        with torch.no_grad():  # 메모리 절약을 위해 gradient 계산 비활성화
-            pred = self.model(img, augment=False)[0]
-        
-        # NMS 적용
-        pred = non_max_suppression(pred, self.conf_thres, self.iou_thres, classes=None, agnostic=False)
-        
-        # 결과 처리
-        for i, det in enumerate(pred):
-            if len(det):
-                det[:, :4] = scale_boxes(img.shape[2:], det[:, :4], img0.shape).round()
-                
-        return pred[0] if pred else [], img0
-    
-    def process_frame(self, img):
-        """프레임 처리 및 시각화"""
-        try:
-            t0 = time.time()
-            self.frame_count += 1
-            
-            # 모든 프레임에서 객체 탐지 수행
-            det, img0 = self.detect_objects(img)
-            self.last_detection_results = (det, img0)
-            
-            # 결과 시각화 - 직접 어노테이션
-            annotator = Annotator(img0, line_width=2, example=str(self.names))
-            
-            if len(det):
-                for *xyxy, conf, cls in reversed(det):
-                    c = int(cls)
-                    label = f'{self.names[c]} {conf:.2f}'
-                    annotator.box_label(xyxy, label, color=colors(c, True))
-                    
-            img0 = annotator.result()
-            
-            # FPS 계산 및 평균화 (0으로 나누기 오류 수정)
-            elapsed_time = time.time() - t0
-            if elapsed_time > 0:  # 0으로 나누기 방지
-                fps = 1 / elapsed_time
-                self.fps_values.append(fps)
-                if self.fps_values:  # 큐가 비어있지 않은지 확인
-                    self.average_fps = sum(self.fps_values) / len(self.fps_values)
-            else:
-                # elapsed_time이 0이거나 매우 작은 경우, 이전 FPS 값 재사용
-                if self.fps_values:
-                    fps = self.fps_values[-1]  # 가장 최근 FPS 값 사용
-                else:
-                    fps = 30.0  # 기본값 설정
-                self.fps_values.append(fps)
-                self.average_fps = fps
-            
-            # 화면 텍스트 표시 - 텍스트 감소로 성능 향상
-            text_color = (0, 255, 0)
-            font_scale = 0.5  # 텍스트 크기 감소
-            
-            # FPS 및 모델 표시
-            cv2.putText(img0, f'FPS: {self.average_fps:.1f}', (10, 20), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 1)
-            source_text = "카메라" if self.source == 'webcam' else "화면캡처"
-            cv2.putText(img0, f'{source_text} | {self.model_name}', (10, 40), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 1)
-            
-            return img0
-        except Exception as e:
-            print(f"프레임 처리 오류: {e}")
-            import traceback
-            traceback.print_exc()
-            return img
-    
-    def stop(self):
-        """스레드 종료"""
-        self.is_running = False
-        self.wait()
-        if self.cap is not None and self.cap.isOpened():
-            self.cap.release()
-    
-    def run(self):
-        """스레드 실행"""
-        if self.source == 'webcam':
-            self.open_camera()
-            
-        while self.is_running:
-            try:
-                if self.source == 'webcam':
-                    if not self.camera_open_failed and self.cap is not None and self.cap.isOpened():
-                        ret, frame = self.cap.read()
-                        if ret:
-                            processed_frame = self.process_frame(frame)
-                            self.change_pixmap_signal.emit(processed_frame)
-                        else:
-                            # 카메라에서 프레임을 읽지 못함 - 에러 메시지를 표시하는 빈 이미지
-                            height, width = 480, 640
-                            error_img = np.zeros((height, width, 3), dtype=np.uint8)
-                            cv2.putText(error_img, "카메라에서 프레임을 읽을 수 없습니다.", (50, height//2), 
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                            self.change_pixmap_signal.emit(error_img)
-                    else:
-                        # 카메라 열기 실패 - 에러 메시지를 표시하는 빈 이미지
-                        height, width = 480, 640
-                        error_img = np.zeros((height, width, 3), dtype=np.uint8)
-                        cv2.putText(error_img, "카메라를 찾을 수 없습니다.", (50, height//2-30), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        cv2.putText(error_img, "모드 변경 버튼을 눌러 화면 캡처를 사용하세요.", (50, height//2+30), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        self.change_pixmap_signal.emit(error_img)
-                else:
-                    # 화면 캡처
-                    screen = self.capture_screen()
-                    if screen is not None:
-                        processed_frame = self.process_frame(screen)
-                        self.change_pixmap_signal.emit(processed_frame)
-                
-                # FPS 제한 - 너무 빠르게 처리되지 않도록
-                time.sleep(0.01)  # 약 100 FPS 제한
-            except Exception as e:
-                print(f"스레드 실행 오류: {e}")
-                import traceback
-                traceback.print_exc()
-                time.sleep(0.5)  # 오류 발생 시 잠시 대기
 
-class YoloV5App(QtWidgets.QDialog):
+    def stop(self):
+        self.running = False
+        self.wait()
+
+class YOLOv5App(QtWidgets.QDialog):
     def __init__(self):
         super().__init__()
-        
-        # UI 파일 로드
         uic.loadUi('yolov5_2.ui', self)
         
-        # UI 요소 연결
-        self.btn_exit.clicked.connect(self.close)
-        self.btn_mode.clicked.connect(self.toggle_mode)
+        # 창 크기 설정
+        self.resize(1280, 720)  # 1280x720 해상도로 설정
         
-        # 윈도우 크기 및 제목 설정
-        self.setWindowTitle("YOLOv5 객체 인식 앱")
-        self.resize(800, 600)
+        # UI 요소 초기화
+        self.image_label = self.findChild(QtWidgets.QLabel, 'cam_screen')
+        if self.image_label is None:
+            QtWidgets.QMessageBox.critical(self, "오류", "UI 요소를 찾을 수 없습니다. (cam_screen)")
+            sys.exit(1)
+        self.image_label.setAlignment(Qt.AlignCenter)
         
-        # 기본 설정
-        self.source = 'webcam'  # 기본 모드는 카메라
+        # 종료 버튼 연결
+        self.exit_button = self.findChild(QtWidgets.QPushButton, 'btn_exit')
+        if self.exit_button is None:
+            QtWidgets.QMessageBox.critical(self, "오류", "UI 요소를 찾을 수 없습니다. (btn_exit)")
+            sys.exit(1)
+        self.exit_button.clicked.connect(self.close)
         
-        # 탐지 스레드 설정
-        self.thread = DetectionThread()
-        self.thread.change_pixmap_signal.connect(self.update_image)
-        self.thread.camera_error_signal.connect(self.show_camera_error)
+        # YOLOv5 모델 로드
+        self.model = None
+        self.load_model()
         
-        # 화면 크기 조정
-        self.cam_screen.setScaledContents(True)
+        # 스레드 초기화
+        self.detection_thread = None
         
-        # 스레드 시작
-        self.thread.start()
+        # 창 크기 조정 이벤트 연결
+        self.resizeEvent = self.on_resize
         
-        # 성능 관련 메시지 표시
-        print("성능 최적화가 적용된 YOLOv5 애플리케이션이 시작되었습니다.")
-        print(f"- 이미지 처리 크기: {self.thread.img_size}px")
-        print(f"- 모든 프레임 처리: 프레임 스킵 없음")
-        print(f"- FP16 최적화: {'사용함' if self.thread.half else '사용안함'}")
+        # 초기 이미지 표시
+        self.show_initial_image()
         
-    def resizeEvent(self, event: QResizeEvent):
-        """창 크기가 변경될 때 UI 조정"""
-        # 창 크기에 맞게 cam_screen 크기 조정
-        new_width = self.width() - 40
-        new_height = self.height() - 100
-        self.cam_screen.setGeometry(20, 20, new_width, new_height)
-        
-        # 버튼 위치 조정
-        self.btn_mode.setGeometry(20, self.height() - 60, 100, 30)
-        self.btn_exit.setGeometry(self.width() - 120, self.height() - 60, 100, 30)
-        
-        super().resizeEvent(event)
-        
-    def toggle_mode(self):
-        """카메라와 화면 캡처 모드 간 전환"""
-        if self.source == 'webcam':
-            self.source = 'screen'
-            self.btn_mode.setText('카메라 모드')
-        else:
-            self.source = 'webcam'
-            self.btn_mode.setText('화면 캡처 모드')
-        
-        self.thread.change_source(self.source)
-    
-    def show_camera_error(self, message):
-        """카메라 오류 메시지 표시"""
-        QtWidgets.QMessageBox.warning(self, "카메라 오류", message)
-    
-    @pyqtSlot(np.ndarray)
-    def update_image(self, cv_img):
-        """OpenCV 이미지를 QLabel에 업데이트"""
+        # 카메라 시작
+        self.start_camera()
+
+    def load_model(self):
         try:
-            # QImage로 변환
-            rgb_image = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+            # 더 가벼운 모델 사용 (yolov5n.pt)
+            self.model = torch.hub.load('yolov5', 'custom', path='yolov5/yolov5n.pt', source='local')
+            self.model.conf = 0.5  # 신뢰도 임계값을 0.5로 상향 조정
+            self.model.iou = 0.45   # IOU 임계값
+            if torch.cuda.is_available():
+                self.model.cuda()
+                self.model.half()  # FP16 사용
+                torch.cuda.empty_cache()  # GPU 메모리 정리
+            self.model.eval()
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "오류", f"모델 로드 중 오류 발생: {str(e)}")
+            sys.exit(1)
+
+    def start_camera(self):
+        if self.detection_thread is None or not self.detection_thread.isRunning():
+            self.detection_thread = DetectionThread(self.model)
+            self.detection_thread.frame_ready.connect(self.update_frame)
+            self.detection_thread.error_occurred.connect(self.handle_error)
+            self.detection_thread.start()
+
+    def update_frame(self, frame):
+        try:
+            # OpenCV BGR -> RGB 변환
+            rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # QImage 생성
             h, w, ch = rgb_image.shape
             bytes_per_line = ch * w
             qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
             
-            # QLabel에 표시
-            self.cam_screen.setPixmap(QPixmap.fromImage(qt_image))
+            # QLabel 크기에 맞게 이미지 크기 조정
+            scaled_pixmap = QPixmap.fromImage(qt_image).scaled(
+                self.image_label.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            
+            # 이미지 표시
+            self.image_label.setPixmap(scaled_pixmap)
+            
         except Exception as e:
-            print(f"이미지 업데이트 오류: {e}")
-    
+            print(f"프레임 업데이트 중 오류 발생: {str(e)}")
+
+    def handle_error(self, error_msg):
+        QtWidgets.QMessageBox.critical(self, "오류", error_msg)
+        self.close()
+
+    def show_initial_image(self):
+        # 초기 이미지 생성 (검은색 배경)
+        initial_image = np.zeros((480, 640, 3), dtype=np.uint8)
+        self.update_frame(initial_image)
+
+    def on_resize(self, event):
+        if hasattr(self, 'image_label') and self.image_label.pixmap():
+            scaled_pixmap = self.image_label.pixmap().scaled(
+                self.image_label.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            self.image_label.setPixmap(scaled_pixmap)
+        super().resizeEvent(event)
+
     def closeEvent(self, event):
-        """앱 종료 시 스레드 정리"""
-        self.thread.stop()
+        if self.detection_thread is not None:
+            self.detection_thread.stop()
         event.accept()
 
-if __name__ == "__main__":
-    # 메인 스레드에서 OpenCL 비활성화 - 일부 시스템에서 성능 향상
-    cv2.ocl.setUseOpenCL(False)
-    
+if __name__ == '__main__':
     app = QtWidgets.QApplication(sys.argv)
-    window = YoloV5App()
+    window = YOLOv5App()
     window.show()
     sys.exit(app.exec_()) 
